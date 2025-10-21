@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import * as XLSX from 'xlsx';
+import { Html5Qrcode } from 'html5-qrcode'; // ✅ SOLO ESTA IMPORTACIÓN
 import localforage from 'localforage';
 import QRCode from 'qrcode';
 import { io } from 'socket.io-client';
-import { Html5Qrcode } from 'html5-qrcode';
 
 // Configurar IndexedDB
 localforage.config({
@@ -130,13 +130,11 @@ function App() {
     await saveData('sessionId', newSessionId);
     socketRef.current?.emit('join-session', newSessionId);
     
-    // URL del servidor WebSocket
-    const serverUrl = 'wss://scan-pwa.onrender.com';
-    
+    // ✅ CORREGIDO: usar window.location.origin
     const qrData = {
       sessionId: newSessionId,
-      serverUrl: serverUrl,
-      clientUrl: window.location.origin,
+      serverUrl: 'wss://scan-pwa.onrender.com',
+      clientUrl: window.location.origin, // ✅ CORREGIDO AQUÍ
       type: 'scan-pwa-connect',
       timestamp: Date.now()
     };
@@ -144,7 +142,7 @@ function App() {
     try {
       const qrUrl = await QRCode.toDataURL(JSON.stringify(qrData));
       setQrCodeUrl(qrUrl);
-      console.log('QR generado para:', currentOrigin);
+      console.log('QR generado para:', window.location.origin);
     } catch (err) {
       console.error('Error QR:', err);
     }
@@ -241,7 +239,7 @@ function App() {
     });
   };
 
-// Iniciar escáner - VERSIÓN SIMPLIFICADA
+// Iniciar escáner - VERSIÓN CORREGIDA
 const startScanner = async () => {
   setScanning(true);
   
@@ -249,8 +247,8 @@ const startScanner = async () => {
   scannerElement.innerHTML = '<div style="padding: 20px; text-align: center;">🔄 Iniciando cámara...</div>';
 
   try {
-    // Usar Html5Qrcode directamente (más estable)
-    const html5Qrcode = new Html5Qrcode("qr-reader");
+    // ✅ CORREGIDO: Usar Html5Qrcode directamente desde la importación
+    const html5Qrcode = new Html5Qrcode("qr-reader"); // ✅ SIN window.
     
     const config = {
       fps: 10,
