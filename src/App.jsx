@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import * as XLSX from 'xlsx';
-import { Html5QrcodeScanner } from 'html5-qrcode';
 import localforage from 'localforage';
 import QRCode from 'qrcode';
 import { io } from 'socket.io-client';
-import { Html5QrcodeScanType } from 'html5-qrcode';
+import { Html5Qrcode } from 'html5-qrcode';
 
 // Configurar IndexedDB
 localforage.config({
@@ -137,7 +136,7 @@ function App() {
     const qrData = {
       sessionId: newSessionId,
       serverUrl: serverUrl,
-      clientUrl: currentOrigin,
+      clientUrl: window.location.origin,
       type: 'scan-pwa-connect',
       timestamp: Date.now()
     };
@@ -251,7 +250,7 @@ const startScanner = async () => {
 
   try {
     // Usar Html5Qrcode directamente (más estable)
-    const html5Qrcode = new window.Html5Qrcode("qr-reader");
+    const html5Qrcode = new Html5Qrcode("qr-reader");
     
     const config = {
       fps: 10,
