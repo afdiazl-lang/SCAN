@@ -4,6 +4,7 @@ import { Html5QrcodeScanner } from 'html5-qrcode';
 import localforage from 'localforage';
 import QRCode from 'qrcode';
 import { io } from 'socket.io-client';
+import { Html5QrcodeScanType } from 'html5-qrcode';
 
 // Configurar IndexedDB
 localforage.config({
@@ -241,32 +242,35 @@ function App() {
     });
   };
 
-  // Iniciar escáner
-  const startScanner = () => {
-    setScanning(true);
+// Iniciar escáner - VERSIÓN SIMPLIFICADA
+const startScanner = async () => {
+  setScanning(true);
+  
+  const scannerElement = document.getElementById('qr-reader');
+  scannerElement.innerHTML = '<div style="padding: 20px; text-align: center;">🔄 Iniciando cámara...</div>';
+
+  try {
+    // Usar Html5Qrcode directamente (más estable)
+    const html5Qrcode = new window.Html5Qrcode("qr-reader");
     
-    const scannerElement = document.getElementById('qr-reader');
-    if (scannerElement.innerHTML) {
-      scannerElement.innerHTML = '';
-    }
+    const config = {
+      fps: 10,
+      qrbox: { width: 250, height: 250 },
+      aspectRatio: 1.0,
+      facingMode: "environment"
+    };
 
-    const scanner = new Html5QrcodeScanner(
-      "qr-reader",
-      { 
-        fps: 10, 
-        qrbox: { width: 250, height: 250 }
-      },
-      false
-    );
-
-    scanner.render(
+    await html5Qrcode.start(
+      { facingMode: "environment" }, 
+      config,
       (decodedText) => {
+        // Código escaneado exitosamente
         try {
           const data = JSON.parse(decodedText);
           if (data.type === 'scan-pwa-connect' && data.sessionId) {
             if (confirm('¿Conectar a sesión de escaneo?')) {
               joinSession(data);
-              scanner.clear();
+              html5Qrcode.stop();
               setScanning(false);
             }
             return;
@@ -274,12 +278,26 @@ function App() {
         } catch (e) {
           addScannedCode(decodedText);
         }
+        
+        // Continuar escaneando después de éxito
+        setTimeout(() => {
+          html5Qrcode.resume();
+        }, 1000);
       },
-      (error) => {
-        // Error silencioso
+      (errorMessage) => {
+        // Error de escaneo (silencioso)
       }
     );
-  };
+
+    // Guardar referencia para poder detener
+    window.currentQrcode = html5Qrcode;
+
+  } catch (err) {
+    console.error('Error iniciando escáner:', err);
+    alert('No se pudo acceder a la cámara: ' + err.message);
+    setScanning(false);
+  }
+};
 
   // Limpiar todos los datos
   const clearAllData = async () => {
@@ -484,17 +502,36 @@ function App() {
                 )}
               </button>
               
-              {/* Contenedor del escáner */}
-              <div id="qr-reader" className="mt-4 rounded-xl overflow-hidden shadow-lg"></div>
-              
-              {/* Contador de escaneos */}
-              {scannedCodes.size > 0 && (
-                <div className="mt-3 text-center">
-                  <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-800">
-                    🔢 {scannedCodes.size} códigos escaneados
-                  </span>
-                </div>
-              )}
+            {/* Contenedor del escáner */}
+<div id="qr-reader" className="mt-4 rounded-xl overflow-hidden shadow-lg"></div>
+
+{/* BOTÓN CERRAR CÁMARA */}
+{scanning && (
+  <button
+    onClick={() => {
+      if (window.currentQrcode) {
+        window.currentQrcode.stop().then(() => {
+          setScanning(false);
+        }).catch(err => {
+          console.error('Error deteniendo escáner:', err);
+          setScanning(false);
+        });
+      }
+    }}
+    className="w-full bg-red-500 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-lg mt-4 transition-colors duration-200"
+  >
+    ❌ Detener Escáner
+  </button>
+)}
+
+{/* Contador de escaneos */}
+{scannedCodes.size > 0 && (
+  <div className="mt-3 text-center">
+    <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-800">
+      🔢 {scannedCodes.size} códigos escaneados
+    </span>
+  </div>
+)}
             </div>
 
             {/* Panel de Control */}
