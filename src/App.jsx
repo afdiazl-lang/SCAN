@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import * as XLSX from 'xlsx';
+import { Html5Qrcode } from 'html5-qrcode'; 
 import localforage from 'localforage';
 import QRCode from 'qrcode';
 import { io } from 'socket.io-client';
+import './App.css';
 
 // Configurar IndexedDB
 localforage.config({
@@ -52,6 +54,43 @@ const configureSocketEvents = (socket, setIsHost, setExcelData, setScannedCodes,
   });
 };
 
+// Función de diagnóstico de cámara
+const diagnoseCamera = async () => {
+  console.log('🔍 Iniciando diagnóstico de cámara...');
+  
+  const results = {
+    navigator: typeof navigator !== 'undefined',
+    mediaDevices: typeof navigator.mediaDevices !== 'undefined',
+    getUserMedia: typeof navigator.mediaDevices?.getUserMedia === 'function',
+    https: window.location.protocol === 'https:',
+    localhost: window.location.hostname === 'localhost',
+    localNetwork: /^(192\.168|10\.|172\.|127\.)/.test(window.location.hostname),
+    url: window.location.href
+  };
+  
+  console.log('📊 Resultados del diagnóstico:', results);
+  
+  // Verificar soporte básico
+  if (!results.navigator) {
+    throw new Error('Objeto navigator no disponible');
+  }
+  
+  if (!results.mediaDevices) {
+    throw new Error('navigator.mediaDevices no existe');
+  }
+  
+  if (!results.getUserMedia) {
+    throw new Error('getUserMedia no soportado');
+  }
+  
+  // Advertencia para HTTP
+  if (!results.https && !results.localhost) {
+    console.warn('⚠️ La cámara requiere HTTPS en redes locales');
+  }
+  
+  return results;
+};
+
 function App() {
   const [excelData, setExcelData] = useState([]);
   const [scannedCodes, setScannedCodes] = useState(new Set());
@@ -62,11 +101,13 @@ function App() {
   const [connectedDevices, setConnectedDevices] = useState(0);
   const [isHost, setIsHost] = useState(false);
   const [socket, setSocket] = useState(null);
+  const [cameraError, setCameraError] = useState('');
 
   const socketRef = useRef(null);
+  const html5QrcodeRef = useRef(null);
 
- // Inicializar socket
-    useEffect(() => {
+  // Inicializar socket
+  useEffect(() => {
     const socketUrl = 'https://scan-pwa.onrender.com';
     
     const newSocket = io(socketUrl);
@@ -90,6 +131,43 @@ function App() {
   // Cargar datos guardados al iniciar
   useEffect(() => {
     loadSavedData();
+  }, []);
+
+  // Detectar conexión via QR
+  useEffect(() => {
+    const checkConnectionParams = async () => {
+      const urlParams = new URLSearchParams(window.location.search);
+      const connectSession = urlParams.get('connect');
+      const serverUrl = urlParams.get('server');
+      
+      if (connectSession && !sessionId) {
+        console.log('🔄 Conectando via parámetros QR...');
+        await joinSession({
+          sessionId: connectSession,
+          serverUrl: serverUrl || 'https://scan-pwa.onrender.com'
+        });
+        
+        // Limpiar URL
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+    };
+    
+    checkConnectionParams();
+  }, [sessionId]);
+
+  // Ejecutar diagnóstico al cargar
+  useEffect(() => {
+    const initialDiagnose = async () => {
+      try {
+        await diagnoseCamera();
+        console.log('✅ Cámara compatible');
+      } catch (error) {
+        console.error('❌ Error cámara:', error);
+        setCameraError(error.message);
+      }
+    };
+    
+    initialDiagnose();
   }, []);
 
   const loadSavedData = async () => {
@@ -121,31 +199,26 @@ function App() {
   };
 
   // Crear nueva sesión (PC)
-  const createSession = async () => {
-    const newSessionId = 'session_' + Math.random().toString(36).substr(2, 9);
-    setSessionId(newSessionId);
-    setIsHost(true);
-    
-    await saveData('sessionId', newSessionId);
-    socketRef.current?.emit('join-session', newSessionId);
-    
-    // ✅ CORREGIDO: usar window.location.origin
-    const qrData = {
-      sessionId: newSessionId,
-      serverUrl: 'wss://scan-pwa.onrender.com',
-      clientUrl: window.location.origin, // ✅ CORREGIDO AQUÍ
-      type: 'scan-pwa-connect',
-      timestamp: Date.now()
-    };
-    
-    try {
-      const qrUrl = await QRCode.toDataURL(JSON.stringify(qrData));
-      setQrCodeUrl(qrUrl);
-      console.log('QR generado para:', window.location.origin);
-    } catch (err) {
-      console.error('Error QR:', err);
-    }
-  };
+const createSession = async () => {
+  const newSessionId = 'session_' + Math.random().toString(36).substr(2, 9);
+  setSessionId(newSessionId);
+  setIsHost(true);
+  
+  await saveData('sessionId', newSessionId);
+  socketRef.current?.emit('join-session', newSessionId);
+  
+  // ✅ CAMBIA a HTTP para desarrollo
+  const currentHost = window.location.hostname;
+  const connectUrl = `http://${currentHost}:5173?connect=${newSessionId}&server=https://scan-pwa.onrender.com&type=scan-pwa`;
+  
+  try {
+    const qrUrl = await QRCode.toDataURL(connectUrl);
+    setQrCodeUrl(qrUrl);
+    console.log('✅ QR generado para:', connectUrl);
+  } catch (err) {
+    console.error('Error QR:', err);
+  }
+};
 
   // Unirse a sesión existente (Móvil)
   const joinSession = async (sessionData) => {
@@ -238,52 +311,141 @@ function App() {
     });
   };
 
-// Iniciar escáner - VERSIÓN CORREGIDA
-const startScanner = async () => {
-  setScanning(true);
-  
-  const scannerElement = document.getElementById('qr-reader');
-  scannerElement.innerHTML = '<div style="padding: 20px; text-align: center;">🔄 Iniciando cámara...</div>';
+  // Iniciar escáner - VERSIÓN MEJORADA
+  const startScanner = async () => {
+    try {
+      // Primero hacer diagnóstico
+      await diagnoseCamera();
+      setCameraError('');
+    } catch (error) {
+      setCameraError(error.message);
+      alert(`❌ Error de cámara: ${error.message}\n\nSolución: Usa HTTPS o permite permisos de cámara`);
+      return;
+    }
 
-  try {
-    // ✅ USAR DESDE CDN (window)
-    const html5Qrcode = new window.Html5Qrcode("qr-reader");
+    // ✅ CREAR O REUTILIZAR EL CONTENEDOR
+    let scannerElement = document.getElementById('qr-reader');
     
-    const config = {
-      fps: 10,
-      qrbox: { width: 250, height: 250 },
-      aspectRatio: 1.0,
-      facingMode: "environment"
-    };
-
-    await html5Qrcode.start(
-      { facingMode: "environment" }, 
-      config,
-      (decodedText) => {
-        // ... resto del código igual
-      },
-      (errorMessage) => {
-        // Error de escaneo (silencioso)
+    // Si no existe, crearlo
+    if (!scannerElement) {
+      scannerElement = document.createElement('div');
+      scannerElement.id = 'qr-reader';
+      scannerElement.className = 'mt-4 rounded-xl overflow-hidden shadow-lg';
+      
+      // Insertarlo después del botón de escanear
+      const scanButton = document.querySelector('button[onclick*="startScanner"]');
+      if (scanButton && scanButton.parentNode) {
+        scanButton.parentNode.insertBefore(scannerElement, scanButton.nextSibling);
+      } else {
+        // Fallback: agregar al body
+        document.body.appendChild(scannerElement);
       }
-    );
+    }
 
-    window.currentQrcode = html5Qrcode;
+    // Limpiar y mostrar estado de carga
+    scannerElement.innerHTML = '<div style="padding: 20px; text-align: center; background: #f3f4f6; border-radius: 12px;">🔄 Iniciando cámara...</div>';
+    scannerElement.style.display = 'block';
 
-  } catch (err) {
-    console.error('Error iniciando escáner:', err);
-    alert('No se pudo acceder a la cámara: ' + err.message);
+    // ✅ VERIFICACIÓN DE LA LIBRERÍA
+    if (typeof Html5Qrcode === 'undefined') {
+      scannerElement.innerHTML = '<div style="padding: 20px; text-align: center; background: #fef2f2; color: #dc2626; border-radius: 12px;">❌ Error: Librería de escaneo no disponible</div>';
+      return;
+    }
+
+    setScanning(true);
+
+    try {
+      // ✅ INICIALIZAR ESCÁNER
+      const html5Qrcode = new Html5Qrcode("qr-reader");
+      html5QrcodeRef.current = html5Qrcode;
+      
+      const config = {
+        fps: 10,
+        qrbox: { width: 250, height: 250 },
+        aspectRatio: 1.0,
+        facingMode: "environment"
+      };
+
+      await html5Qrcode.start(
+        { facingMode: "environment" }, 
+        config,
+        (decodedText) => {
+          // Código escaneado exitosamente
+          try {
+            const data = JSON.parse(decodedText);
+            if (data.type === 'scan-pwa-connect' && data.sessionId) {
+              if (confirm('¿Conectar a sesión de escaneo?')) {
+                joinSession(data);
+                stopScanner();
+              }
+              return;
+            }
+          } catch (e) {
+            // No es JSON, es un código normal
+            addScannedCode(decodedText);
+          }
+          
+          // Continuar escaneando después de éxito
+          setTimeout(() => {
+            html5Qrcode.resume();
+          }, 1000);
+        },
+        (errorMessage) => {
+          // Error de escaneo (silencioso) - no mostrar alertas
+          console.log('Escaneando...', errorMessage);
+        }
+      );
+
+    } catch (err) {
+      console.error('Error iniciando escáner:', err);
+      setCameraError(err.message);
+      
+      // Mostrar error en el contenedor
+      scannerElement.innerHTML = `
+        <div style="padding: 20px; text-align: center; background: #fef2f2; color: #dc2626; border-radius: 12px;">
+          ❌ Error de cámara: ${err.message || 'No se pudo acceder a la cámara'}
+          <br><br>
+          <button onclick="window.startScanner()" style="padding: 8px 16px; background: #dc2626; color: white; border: none; border-radius: 6px; cursor: pointer;">
+            Reintentar
+          </button>
+        </div>
+      `;
+      
+      setScanning(false);
+    }
+  };
+
+  // Detener escáner
+  const stopScanner = async () => {
+    if (html5QrcodeRef.current) {
+      try {
+        await html5QrcodeRef.current.stop();
+        html5QrcodeRef.current.clear();
+      } catch (err) {
+        console.error('Error deteniendo escáner:', err);
+      }
+      html5QrcodeRef.current = null;
+    }
+    
+    // Ocultar contenedor
+    const scannerElement = document.getElementById('qr-reader');
+    if (scannerElement) {
+      scannerElement.style.display = 'none';
+    }
+    
     setScanning(false);
-  }
-};
+  };
 
   // Limpiar todos los datos
   const clearAllData = async () => {
     if (confirm('¿Estás seguro de limpiar todos los datos?')) {
+      await stopScanner();
       setExcelData([]);
       setScannedCodes(new Set());
       setSessionId(null);
       setQrCodeUrl('');
       setIsHost(false);
+      setCameraError('');
       await localforage.clear();
       alert('🗑️ Todos los datos limpiados');
     }
@@ -304,6 +466,16 @@ const startScanner = async () => {
       porcentaje: Math.round((escaneados / excelData.length) * 100)
     };
   };
+
+  // Exponer función globalmente
+  useEffect(() => {
+    window.startScanner = startScanner;
+    window.stopScanner = stopScanner;
+    
+    return () => {
+      stopScanner();
+    };
+  }, []);
 
   const progress = calculateProgress();
 
@@ -333,6 +505,13 @@ const startScanner = async () => {
             <p className="text-xs text-green-600 mt-1">
               {connectedDevices > 0 ? `${connectedDevices} dispositivos conectados` : 'Conectado al servidor'}
             </p>
+          )}
+          
+          {/* Estado de cámara */}
+          {cameraError && (
+            <div className="mt-2 p-2 bg-red-100 border border-red-300 rounded-lg">
+              <p className="text-xs text-red-600">⚠️ {cameraError}</p>
+            </div>
           )}
         </div>
 
@@ -458,19 +637,17 @@ const startScanner = async () => {
             {/* Escáner */}
             <div className="mb-6">
               <button
-                onClick={startScanner}
-                disabled={scanning}
-                className="w-full bg-gradient-to-r from-green-500 to-green-600 
-                          hover:from-green-600 hover:to-green-700 
-                          disabled:from-gray-400 disabled:to-gray-500 
-                          text-white font-bold py-4 px-4 rounded-xl 
-                          shadow-lg transition-all duration-200 
-                          disabled:shadow-none mb-4 text-lg"
+                onClick={scanning ? stopScanner : startScanner}
+                className={`w-full ${
+                  scanning 
+                    ? 'bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700' 
+                    : 'bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700'
+                } text-white font-bold py-4 px-4 rounded-xl shadow-lg transition-all duration-200 text-lg`}
               >
                 {scanning ? (
                   <span className="flex items-center justify-center">
                     <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
-                    Escaneando...
+                    Escaneando... (Toca para detener)
                   </span>
                 ) : (
                   <span className="flex items-center justify-center">
@@ -478,37 +655,15 @@ const startScanner = async () => {
                   </span>
                 )}
               </button>
-              
-            {/* Contenedor del escáner */}
-<div id="qr-reader" className="mt-4 rounded-xl overflow-hidden shadow-lg"></div>
 
-{/* BOTÓN CERRAR CÁMARA */}
-{scanning && (
-  <button
-    onClick={() => {
-      if (window.currentQrcode) {
-        window.currentQrcode.stop().then(() => {
-          setScanning(false);
-        }).catch(err => {
-          console.error('Error deteniendo escáner:', err);
-          setScanning(false);
-        });
-      }
-    }}
-    className="w-full bg-red-500 hover:bg-red-700 text-white font-bold py-3 px-4 rounded-lg mt-4 transition-colors duration-200"
-  >
-    ❌ Detener Escáner
-  </button>
-)}
-
-{/* Contador de escaneos */}
-{scannedCodes.size > 0 && (
-  <div className="mt-3 text-center">
-    <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-800">
-      🔢 {scannedCodes.size} códigos escaneados
-    </span>
-  </div>
-)}
+              {/* Contador de escaneos */}
+              {scannedCodes.size > 0 && (
+                <div className="mt-3 text-center">
+                  <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-blue-100 text-blue-800">
+                    🔢 {scannedCodes.size} códigos escaneados
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Panel de Control */}
@@ -580,7 +735,7 @@ const startScanner = async () => {
   );
 }
 
-// Funciones auxiliares
+// Funciones auxiliares (mantener igual)
 const generarReporte = (excelData, scannedCodes) => {
   const scannedArray = Array.from(scannedCodes);
   
