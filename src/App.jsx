@@ -15,6 +15,7 @@ localforage.config({
 // Función para configurar eventos del socket (reutilizable)
 const configureSocketEvents = (socket, setIsHost, setExcelData, setScannedCodes, setConnectedDevices, saveData) => {
   socket.on('session-data', (data) => {
+    console.log('📥 Datos de sesión recibidos:', data);
     setExcelData(data.excelData || []);
     setScannedCodes(new Set(data.scannedCodes || []));
     saveData('excelData', data.excelData || []);
@@ -22,6 +23,7 @@ const configureSocketEvents = (socket, setIsHost, setExcelData, setScannedCodes,
   });
 
   socket.on('scan-sincronizado', (data) => {
+    console.log('✅ Scan sincronizado:', data.code);
     setScannedCodes(prev => {
       const newSet = new Set(prev);
       newSet.add(data.code);
@@ -31,10 +33,12 @@ const configureSocketEvents = (socket, setIsHost, setExcelData, setScannedCodes,
   });
 
   socket.on('scan-duplicado', (code) => {
+    console.warn('⚠️ Código duplicado detectado:', code);
     alert(`⚠️ Código duplicado: ${code}`);
   });
 
   socket.on('excel-actualizado', (data) => {
+    console.log('📊 Excel actualizado');
     setExcelData(data.excelData || []);
     setScannedCodes(new Set(data.scannedCodes || []));
     saveData('excelData', data.excelData || []);
@@ -42,6 +46,7 @@ const configureSocketEvents = (socket, setIsHost, setExcelData, setScannedCodes,
   });
 
   socket.on('dispositivos-conectados', (count) => {
+    console.log('👥 Dispositivos conectados:', count);
     setConnectedDevices(count);
   });
 
@@ -50,11 +55,15 @@ const configureSocketEvents = (socket, setIsHost, setExcelData, setScannedCodes,
   });
 
   socket.on('disconnect', () => {
-    console.log('❌ Socket desconectado');
+    console.warn('❌ Socket desconectado');
+  });
+
+  socket.on('error', (error) => {
+    console.error('🔴 Socket error:', error);
   });
 };
 
-// Función de diagnóstico de cámara
+// Función de diagnóstico de cámara MEJORADA
 const diagnoseCamera = async () => {
   console.log('🔍 Iniciando diagnóstico de cámara...');
   
@@ -63,9 +72,11 @@ const diagnoseCamera = async () => {
     mediaDevices: typeof navigator.mediaDevices !== 'undefined',
     getUserMedia: typeof navigator.mediaDevices?.getUserMedia === 'function',
     https: window.location.protocol === 'https:',
+    isSecureContext: window.isSecureContext, // ✅ AGREGADO
     localhost: window.location.hostname === 'localhost',
     localNetwork: /^(192\.168|10\.|172\.|127\.)/.test(window.location.hostname),
-    url: window.location.href
+    url: window.location.href,
+    userAgent: navigator.userAgent
   };
   
   console.log('📊 Resultados del diagnóstico:', results);
@@ -76,16 +87,35 @@ const diagnoseCamera = async () => {
   }
   
   if (!results.mediaDevices) {
-    throw new Error('navigator.mediaDevices no existe');
+    throw new Error('❌ navigator.mediaDevices no existe. Verifica que estés en HTTPS o localhost.');
   }
   
   if (!results.getUserMedia) {
-    throw new Error('getUserMedia no soportado');
+    throw new Error('❌ getUserMedia no soportado en este navegador');
+  }
+  
+  // ✅ CRÍTICO: Verificar contexto seguro
+  if (!results.isSecureContext) {
+    throw new Error('❌ NO SECURE CONTEXT - La cámara requiere HTTPS en redes locales. Usa LocalTunnel o Ngrok.');
   }
   
   // Advertencia para HTTP
   if (!results.https && !results.localhost) {
-    console.warn('⚠️ La cámara requiere HTTPS en redes locales');
+    console.warn('⚠️ Usando HTTP en red local - puede fallar en móviles');
+  }
+
+  // Intentar enumerar dispositivos
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cameras = devices.filter(d => d.kind === 'videoinput');
+    console.log(`📷 Cámaras disponibles: ${cameras.length}`, cameras);
+    
+    if (cameras.length === 0) {
+      throw new Error('❌ No se detectaron cámaras en el dispositivo');
+    }
+  } catch (error) {
+    console.error('Error enumerando dispositivos:', error);
+    throw new Error(`Error al detectar cámaras: ${error.message}`);
   }
   
   return results;
@@ -102,15 +132,23 @@ function App() {
   const [isHost, setIsHost] = useState(false);
   const [socket, setSocket] = useState(null);
   const [cameraError, setCameraError] = useState('');
+  const [cameraPermission, setCameraPermission] = useState('unknown'); // ✅ NUEVO
 
   const socketRef = useRef(null);
   const html5QrcodeRef = useRef(null);
 
-  // Inicializar socket
+  // Inicializar socket - ✅ CORREGIDO: Sin dependencia de isHost
   useEffect(() => {
     const socketUrl = 'https://scan-pwa.onrender.com';
     
-    const newSocket = io(socketUrl);
+    console.log('🔌 Conectando a socket:', socketUrl);
+    const newSocket = io(socketUrl, {
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionAttempts: 5
+    });
+    
     socketRef.current = newSocket;
     setSocket(newSocket);
 
@@ -124,9 +162,10 @@ function App() {
     );
 
     return () => {
+      console.log('🔌 Desconectando socket');
       newSocket.disconnect();
     };
-  }, [isHost]);
+  }, []); // ✅ SOLO AL MONTAR
 
   // Cargar datos guardados al iniciar
   useEffect(() => {
@@ -161,8 +200,9 @@ function App() {
       try {
         await diagnoseCamera();
         console.log('✅ Cámara compatible');
+        setCameraError('');
       } catch (error) {
-        console.error('❌ Error cámara:', error);
+        console.error('❌ Error cámara:', error.message);
         setCameraError(error.message);
       }
     };
@@ -176,9 +216,16 @@ function App() {
       const savedScannedCodes = await localforage.getItem('scannedCodes');
       const savedSessionId = await localforage.getItem('sessionId');
       
-      if (savedExcelData) setExcelData(savedExcelData);
-      if (savedScannedCodes) setScannedCodes(new Set(savedScannedCodes));
+      if (savedExcelData) {
+        console.log('📥 Datos de Excel cargados:', savedExcelData.length);
+        setExcelData(savedExcelData);
+      }
+      if (savedScannedCodes) {
+        console.log('📥 Códigos escaneados cargados:', savedScannedCodes.length);
+        setScannedCodes(new Set(savedScannedCodes));
+      }
       if (savedSessionId) {
+        console.log('📥 Sesión guardada:', savedSessionId);
         setSessionId(savedSessionId);
         socketRef.current?.emit('join-session', savedSessionId);
       }
@@ -193,392 +240,322 @@ function App() {
   const saveData = async (key, data) => {
     try {
       await localforage.setItem(key, data);
+      console.log(`💾 Guardado: ${key}`);
     } catch (error) {
       console.error('Error guardando datos:', error);
     }
   };
 
-  // Crear nueva sesión (PC)
-const createSession = async () => {
-  const newSessionId = 'session_' + Math.random().toString(36).substr(2, 9);
-  setSessionId(newSessionId);
-  setIsHost(true);
-  
-  await saveData('sessionId', newSessionId);
-  socketRef.current?.emit('join-session', newSessionId);
-  
-  // ✅ CAMBIA a HTTP para desarrollo
-  const currentHost = window.location.hostname;
-  const connectUrl = `http://${currentHost}:5173?connect=${newSessionId}&server=https://scan-pwa.onrender.com&type=scan-pwa`;
-  
-  try {
-    const qrUrl = await QRCode.toDataURL(connectUrl);
-    setQrCodeUrl(qrUrl);
-    console.log('✅ QR generado para:', connectUrl);
-  } catch (err) {
-    console.error('Error QR:', err);
-  }
-};
-
-  // Unirse a sesión existente (Móvil)
-  const joinSession = async (sessionData) => {
-    console.log('Uniéndose a sesión:', sessionData);
+  // ✅ CORREGIDO: Crear nueva sesión con URL dinámica
+  const createSession = async () => {
+    const newSessionId = 'session_' + Math.random().toString(36).substr(2, 9);
+    setSessionId(newSessionId);
+    setIsHost(true);
     
-    if (sessionData.serverUrl && sessionData.serverUrl !== 'http://localhost:3000') {
-      socketRef.current?.disconnect();
-      const newSocket = io(sessionData.serverUrl);
-      socketRef.current = newSocket;
-      setSocket(newSocket);
-      
-      configureSocketEvents(
-        newSocket, 
-        setIsHost, 
-        setExcelData, 
-        setScannedCodes, 
-        setConnectedDevices, 
-        saveData
-      );
+    await saveData('sessionId', newSessionId);
+    socketRef.current?.emit('join-session', newSessionId);
+    
+    // ✅ CORREGIDO: Usar protocol y host actuales
+    const connectUrl = `${window.location.protocol}//${window.location.host}?connect=${newSessionId}&server=https://scan-pwa.onrender.com&type=scan-pwa`;
+    
+    try {
+      const qrUrl = await QRCode.toDataURL(connectUrl, {
+        width: 300,
+        margin: 2,
+        color: {
+          dark: '#000000',
+          light: '#FFFFFF'
+        }
+      });
+      setQrCodeUrl(qrUrl);
+      console.log('✅ QR generado para:', connectUrl);
+    } catch (error) {
+      console.error('Error generando QR:', error);
+      alert('Error generando código QR');
     }
-    
-    setSessionId(sessionData.sessionId);
-    setIsHost(false);
-    
-    await saveData('sessionId', sessionData.sessionId);
-    
-    setTimeout(() => {
-      socketRef.current?.emit('join-session', sessionData.sessionId);
-      console.log('Emitiendo join-session para:', sessionData.sessionId);
-    }, 1000);
-    
-    setQrCodeUrl('');
-    alert('✅ Conectado a la sesión de escaneo');
   };
 
-  // Manejar carga de Excel (solo host)
-  const handleFileUpload = (event) => {
-    if (!isHost && sessionId) {
-      alert('Solo el dispositivo principal puede cargar archivos Excel');
+  // Unirse a sesión existente
+  const joinSession = async ({ sessionId: sid, serverUrl }) => {
+    if (!sid) {
+      alert('⚠️ ID de sesión inválido');
       return;
     }
 
-    const file = event.target.files[0];
+    setSessionId(sid);
+    setIsHost(false);
+    await saveData('sessionId', sid);
+    
+    socketRef.current?.emit('join-session', sid);
+    console.log('✅ Unido a sesión:', sid);
+  };
+
+  // Manejar carga de Excel
+  const handleFileUpload = async (e) => {
+    const file = e.target.files[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const data = new Uint8Array(e.target.result);
-      const workbook = XLSX.read(data, { type: 'array' });
-      const firstSheetName = workbook.SheetNames[0];
-      const worksheet = workbook.Sheets[firstSheetName];
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data);
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
       const jsonData = XLSX.utils.sheet_to_json(worksheet);
-      
+
       setExcelData(jsonData);
-      saveData('excelData', jsonData);
-      
-      if (sessionId) {
-        socketRef.current?.emit('update-excel', {
+      await saveData('excelData', jsonData);
+
+      if (sessionId && socketRef.current) {
+        socketRef.current.emit('actualizar-excel', {
           sessionId,
           excelData: jsonData
         });
       }
-      
-      alert(`✅ Excel cargado: ${jsonData.length} registros`);
-    };
-    reader.readAsArrayBuffer(file);
+
+      console.log('✅ Excel cargado:', jsonData.length, 'productos');
+      alert(`✅ ${jsonData.length} productos cargados`);
+    } catch (error) {
+      console.error('Error cargando Excel:', error);
+      alert('❌ Error al cargar el archivo Excel');
+    }
   };
 
-  // Agregar código escaneado
-  const addScannedCode = (decodedText) => {
-    setScannedCodes(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(decodedText)) {
-        alert('⚠️ Código duplicado: ' + decodedText);
-        return prev;
-      } else {
-        newSet.add(decodedText);
-        saveData('scannedCodes', Array.from(newSet));
-        
-        if (sessionId) {
-          socketRef.current?.emit('new-scan', {
-            sessionId,
-            code: decodedText
-          });
-        }
-        
-        alert('✅ Escaneado: ' + decodedText);
-        return newSet;
-      }
-    });
-  };
-
-  // Iniciar escáner - VERSIÓN MEJORADA
+  // ✅ MEJORADO: Iniciar scanner con mejor manejo de errores
   const startScanner = async () => {
     try {
-      // Primero hacer diagnóstico
+      // Verificar diagnóstico
       await diagnoseCamera();
-      setCameraError('');
-    } catch (error) {
-      setCameraError(error.message);
-      alert(`❌ Error de cámara: ${error.message}\n\nSolución: Usa HTTPS o permite permisos de cámara`);
-      return;
-    }
 
-    // ✅ CREAR O REUTILIZAR EL CONTENEDOR
-    let scannerElement = document.getElementById('qr-reader');
-    
-    // Si no existe, crearlo
-    if (!scannerElement) {
-      scannerElement = document.createElement('div');
-      scannerElement.id = 'qr-reader';
-      scannerElement.className = 'mt-4 rounded-xl overflow-hidden shadow-lg';
-      
-      // Insertarlo después del botón de escanear
-      const scanButton = document.querySelector('button[onclick*="startScanner"]');
-      if (scanButton && scanButton.parentNode) {
-        scanButton.parentNode.insertBefore(scannerElement, scanButton.nextSibling);
-      } else {
-        // Fallback: agregar al body
-        document.body.appendChild(scannerElement);
+      if (html5QrcodeRef.current) {
+        console.log('⚠️ Scanner ya está activo');
+        return;
       }
-    }
 
-    // Limpiar y mostrar estado de carga
-    scannerElement.innerHTML = '<div style="padding: 20px; text-align: center; background: #f3f4f6; border-radius: 12px;">🔄 Iniciando cámara...</div>';
-    scannerElement.style.display = 'block';
+      const html5QrCode = new Html5Qrcode("reader");
+      html5QrcodeRef.current = html5QrCode;
 
-    // ✅ VERIFICACIÓN DE LA LIBRERÍA
-    if (typeof Html5Qrcode === 'undefined') {
-      scannerElement.innerHTML = '<div style="padding: 20px; text-align: center; background: #fef2f2; color: #dc2626; border-radius: 12px;">❌ Error: Librería de escaneo no disponible</div>';
-      return;
-    }
-
-    setScanning(true);
-
-    try {
-      // ✅ INICIALIZAR ESCÁNER
-      const html5Qrcode = new Html5Qrcode("qr-reader");
-      html5QrcodeRef.current = html5Qrcode;
-      
       const config = {
         fps: 10,
         qrbox: { width: 250, height: 250 },
         aspectRatio: 1.0,
-        facingMode: "environment"
+        disableFlip: false,
+        rememberLastUsedCamera: true,
+        showTorchButtonIfSupported: true
       };
 
-      await html5Qrcode.start(
-        { facingMode: "environment" }, 
+      console.log('📷 Iniciando scanner...');
+      
+      await html5QrCode.start(
+        { facingMode: "environment" }, // Cámara trasera
         config,
-        (decodedText) => {
-          // Código escaneado exitosamente
-          try {
-            const data = JSON.parse(decodedText);
-            if (data.type === 'scan-pwa-connect' && data.sessionId) {
-              if (confirm('¿Conectar a sesión de escaneo?')) {
-                joinSession(data);
-                stopScanner();
-              }
-              return;
-            }
-          } catch (e) {
-            // No es JSON, es un código normal
-            addScannedCode(decodedText);
-          }
+        async (decodedText, decodedResult) => {
+          console.log('📷 Código detectado:', decodedText);
           
-          // Continuar escaneando después de éxito
-          setTimeout(() => {
-            html5Qrcode.resume();
-          }, 1000);
+          // Vibración de feedback
+          if ('vibrate' in navigator) {
+            navigator.vibrate(200);
+          }
+
+          // Si es HOST y escanea QR de conexión
+          if (isHost && decodedText.includes('connect=')) {
+            console.log('🔗 QR de conexión detectado (ignorando en host)');
+            return;
+          }
+
+          // Procesar scan normal
+          if (scannedCodes.has(decodedText)) {
+            console.warn('⚠️ Código duplicado:', decodedText);
+            alert(`⚠️ Código ya escaneado: ${decodedText}`);
+            
+            if (socketRef.current && sessionId) {
+              socketRef.current.emit('scan-duplicado', {
+                sessionId,
+                code: decodedText
+              });
+            }
+            return;
+          }
+
+          // Agregar código nuevo
+          setScannedCodes(prev => {
+            const newSet = new Set(prev);
+            newSet.add(decodedText);
+            saveData('scannedCodes', Array.from(newSet));
+            return newSet;
+          });
+
+          // Sincronizar con servidor
+          if (socketRef.current && sessionId) {
+            socketRef.current.emit('scan-code', {
+              sessionId,
+              code: decodedText,
+              timestamp: new Date().toISOString()
+            });
+          }
+
+          console.log('✅ Código agregado:', decodedText);
         },
         (errorMessage) => {
-          // Error de escaneo (silencioso) - no mostrar alertas
-          console.log('Escaneando...', errorMessage);
+          // Solo loguear errores reales, no "No QR code found"
+          if (!errorMessage.includes('NotFoundException')) {
+            console.debug('Scanner:', errorMessage);
+          }
         }
       );
 
-    } catch (err) {
-      console.error('Error iniciando escáner:', err);
-      setCameraError(err.message);
+      setScanning(true);
+      setCameraPermission('granted');
+      setCameraError('');
+      console.log('✅ Scanner activo');
+
+    } catch (error) {
+      console.error('❌ Error iniciando scanner:', error);
       
-      // Mostrar error en el contenedor
-      scannerElement.innerHTML = `
-        <div style="padding: 20px; text-align: center; background: #fef2f2; color: #dc2626; border-radius: 12px;">
-          ❌ Error de cámara: ${err.message || 'No se pudo acceder a la cámara'}
-          <br><br>
-          <button onclick="window.startScanner()" style="padding: 8px 16px; background: #dc2626; color: white; border: none; border-radius: 6px; cursor: pointer;">
-            Reintentar
-          </button>
-        </div>
-      `;
+      let errorMsg = 'Error al acceder a la cámara';
       
-      setScanning(false);
+      if (error.name === 'NotAllowedError') {
+        errorMsg = '❌ Permiso de cámara denegado. Por favor, permite el acceso a la cámara.';
+        setCameraPermission('denied');
+      } else if (error.name === 'NotFoundError') {
+        errorMsg = '❌ No se encontró ninguna cámara en este dispositivo.';
+      } else if (error.name === 'NotReadableError') {
+        errorMsg = '❌ La cámara está siendo usada por otra aplicación.';
+      } else if (error.message.includes('SECURE CONTEXT')) {
+        errorMsg = '❌ Se requiere HTTPS para usar la cámara. Usa LocalTunnel o Ngrok.';
+      }
+      
+      setCameraError(errorMsg);
+      alert(errorMsg);
     }
   };
 
-  // Detener escáner
+  // Detener scanner
   const stopScanner = async () => {
-    if (html5QrcodeRef.current) {
-      try {
+    try {
+      if (html5QrcodeRef.current) {
         await html5QrcodeRef.current.stop();
-        html5QrcodeRef.current.clear();
-      } catch (err) {
-        console.error('Error deteniendo escáner:', err);
+        html5QrcodeRef.current = null;
+        setScanning(false);
+        console.log('⏹️ Scanner detenido');
       }
-      html5QrcodeRef.current = null;
+    } catch (error) {
+      console.error('Error deteniendo scanner:', error);
     }
-    
-    // Ocultar contenedor
-    const scannerElement = document.getElementById('qr-reader');
-    if (scannerElement) {
-      scannerElement.style.display = 'none';
-    }
-    
-    setScanning(false);
   };
 
   // Limpiar todos los datos
   const clearAllData = async () => {
-    if (confirm('¿Estás seguro de limpiar todos los datos?')) {
-      await stopScanner();
-      setExcelData([]);
-      setScannedCodes(new Set());
-      setSessionId(null);
-      setQrCodeUrl('');
-      setIsHost(false);
-      setCameraError('');
-      await localforage.clear();
-      alert('🗑️ Todos los datos limpiados');
-    }
+    if (!confirm('¿Seguro que quieres borrar todos los datos?')) return;
+
+    await stopScanner();
+    
+    setExcelData([]);
+    setScannedCodes(new Set());
+    setSessionId(null);
+    setQrCodeUrl('');
+    setIsHost(false);
+
+    await localforage.clear();
+    console.log('🗑️ Datos limpiados');
   };
 
   // Calcular progreso
-  const calculateProgress = () => {
-    if (excelData.length === 0) return 0;
-    const scannedArray = Array.from(scannedCodes);
-    
-    const escaneados = excelData.filter(item => 
-      scannedArray.includes(item.Código?.toString())
-    ).length;
-    
-    return {
-      escaneados,
-      total: excelData.length,
-      porcentaje: Math.round((escaneados / excelData.length) * 100)
-    };
+  const progress = {
+    total: excelData.length,
+    escaneados: Array.from(scannedCodes).filter(code =>
+      excelData.some(item => item.Código?.toString() === code)
+    ).length,
+    porcentaje: excelData.length > 0
+      ? Math.round(
+          (Array.from(scannedCodes).filter(code =>
+            excelData.some(item => item.Código?.toString() === code)
+          ).length / excelData.length) * 100
+        )
+      : 0
   };
-
-  // Exponer función globalmente
-  useEffect(() => {
-    window.startScanner = startScanner;
-    window.stopScanner = stopScanner;
-    
-    return () => {
-      stopScanner();
-    };
-  }, []);
-
-  const progress = calculateProgress();
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gray-100 flex items-center justify-center">
-        <div className="text-xl">🔄 Cargando...</div>
+      <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-blue-500 to-purple-600">
+        <div className="text-white text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-white mx-auto mb-4"></div>
+          <p className="text-xl font-bold">Cargando...</p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gray-100 p-3 safe-area-padding">
-      <div className="max-w-md mx-auto bg-white rounded-xl shadow-md overflow-hidden p-4">
-        
-        {/* Header con estado de conexión */}
+    <div className="min-h-screen bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500 p-4">
+      <div className="max-w-md mx-auto bg-white rounded-2xl shadow-2xl p-6">
+        {/* Header */}
         <div className="text-center mb-6">
-          <h1 className="text-2xl font-bold text-blue-600 mb-2">
-            📱 Scan PWA {sessionId ? '🔗' : '🔴'}
+          <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent mb-2">
+            📦 Scan PWA
           </h1>
           <p className="text-sm text-gray-600">
-            {sessionId ? 
-              (isHost ? 'Modo PC - Esperando móviles' : 'Modo Móvil - Conectado') : 
-              'Desconectado'}
+            Escaneo offline con sincronización en tiempo real
           </p>
-          {sessionId && (
-            <p className="text-xs text-green-600 mt-1">
-              {connectedDevices > 0 ? `${connectedDevices} dispositivos conectados` : 'Conectado al servidor'}
-            </p>
-          )}
           
-          {/* Estado de cámara */}
+          {/* ✅ NUEVO: Mostrar advertencia de cámara */}
           {cameraError && (
-            <div className="mt-2 p-2 bg-red-100 border border-red-300 rounded-lg">
-              <p className="text-xs text-red-600">⚠️ {cameraError}</p>
+            <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+              <p className="text-sm text-red-800 font-medium">{cameraError}</p>
+              {!window.isSecureContext && (
+                <p className="text-xs text-red-600 mt-2">
+                  💡 Solución: Usa LocalTunnel o Ngrok para obtener HTTPS
+                </p>
+              )}
             </div>
           )}
         </div>
 
-        {/* Sistema de conexión */}
-        {!sessionId ? (
-          <div className="mb-6 text-center">
+        {/* Sección de escáner */}
+        <div id="reader" className="mb-6 rounded-xl overflow-hidden shadow-lg"></div>
+
+        {/* Selección de Modo */}
+        {!sessionId && (
+          <div className="mb-6 space-y-3">
             <button
               onClick={createSession}
-              className="w-full bg-blue-500 hover:bg-blue-700 text-white font-bold py-4 px-4 rounded-xl text-lg mb-3"
+              className="w-full bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white font-bold py-4 px-4 rounded-xl shadow-lg transition-all duration-200"
             >
-              🖥️ Modo PC - Crear Sesión
+              🖥️ Modo PC (Host)
             </button>
-            <p className="text-sm text-gray-600 mb-3">o</p>
-            
-            {/* BOTÓN ESCANEAR QR */}
-            <button
-              onClick={startScanner}
-              className="w-full bg-green-500 hover:bg-green-700 text-white font-bold py-4 px-4 rounded-xl text-lg mb-3"
-            >
-              📱 Escanear QR
-            </button>
-            
-            {/* BOTÓN MANUAL TEMPORAL */}
             <button
               onClick={() => {
-                const sessionId = prompt('Ingresa el ID de sesión (mira en la PC):');
-                if (sessionId) {
-                  joinSession({
-                    sessionId: sessionId,
-                    serverUrl: 'https://scan-pwa.onrender.com'
-                  });
-                }
+                const sid = prompt('Ingresa el ID de sesión:');
+                if (sid) joinSession({ sessionId: sid, serverUrl: 'https://scan-pwa.onrender.com' });
               }}
-              className="w-full bg-orange-500 hover:bg-orange-700 text-white font-bold py-3 px-4 rounded-lg text-sm"
+              className="w-full bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white font-bold py-4 px-4 rounded-xl shadow-lg transition-all duration-200"
             >
-              🔗 Conexión Manual (Si QR falla)
+              📱 Modo Móvil (Client)
             </button>
           </div>
-        ) : (
+        )}
+
+        {/* Interfaz Principal */}
+        {sessionId && (
           <>
-            {/* QR Code para conexión (solo host) */}
+            {/* QR de Conexión (Solo Host) */}
             {isHost && qrCodeUrl && (
-              <div className="mb-6 text-center p-4 bg-blue-50 rounded-xl">
-                <h3 className="font-semibold mb-3">📱 Escanear para conectar</h3>
-                <img src={qrCodeUrl} alt="QR Code" className="mx-auto w-48 h-48 rounded-lg shadow-lg" />
-                <p className="text-xs text-gray-600 mt-2">
-                  Usa el modo móvil en otro dispositivo para escanear este código
+              <div className="mb-6 p-4 bg-gradient-to-r from-blue-50 to-purple-50 rounded-xl border border-blue-100">
+                <h3 className="font-semibold text-center mb-3 text-gray-800">
+                  📱 Escanea para conectar dispositivos
+                </h3>
+                <div className="flex justify-center">
+                  <img src={qrCodeUrl} alt="QR Conexión" className="w-48 h-48 rounded-lg shadow-md" />
+                </div>
+                <p className="text-xs text-center text-gray-600 mt-2">
+                  Dispositivos conectados: <span className="font-bold text-blue-600">{connectedDevices}</span>
                 </p>
               </div>
             )}
 
-            {isHost && sessionId && (
-              <div className="text-center text-sm text-gray-600 mt-2 p-3 bg-yellow-50 rounded-lg mb-4">
-                <p>📋 <strong>ID de sesión para conexión manual:</strong></p>
-                <p className="font-mono text-blue-600 bg-white p-2 rounded mt-1 border">
-                  {sessionId}
-                </p>
-                <p className="text-xs text-gray-500 mt-1">
-                  Copia este ID para usar en "Conexión Manual" del móvil
-                </p>
-              </div>
-            )}
-
-            {/* Cargar Excel (solo host) */}
+            {/* Cargar Excel (Solo Host) */}
             {isHost && (
               <div className="mb-6">
-                <label className="block text-sm font-medium text-gray-700 mb-3">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
                   📊 Cargar Archivo Excel
                 </label>
                 <div className="relative">
@@ -638,10 +615,13 @@ const createSession = async () => {
             <div className="mb-6">
               <button
                 onClick={scanning ? stopScanner : startScanner}
+                disabled={!!cameraError && !window.isSecureContext}
                 className={`w-full ${
                   scanning 
                     ? 'bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700' 
                     : 'bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700'
+                } ${
+                  (cameraError && !window.isSecureContext) ? 'opacity-50 cursor-not-allowed' : ''
                 } text-white font-bold py-4 px-4 rounded-xl shadow-lg transition-all duration-200 text-lg`}
               >
                 {scanning ? (
@@ -717,6 +697,17 @@ const createSession = async () => {
                     {sessionId.substring(0, 8)}...
                   </span>
                 </div>
+                {/* ✅ NUEVO: Estado de cámara */}
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-gray-600">📷 Cámara:</span>
+                  <span className={`text-sm font-medium ${
+                    cameraPermission === 'granted' ? 'text-green-600' : 
+                    cameraPermission === 'denied' ? 'text-red-600' : 'text-gray-600'
+                  }`}>
+                    {cameraPermission === 'granted' ? '✅ OK' : 
+                     cameraPermission === 'denied' ? '❌ Bloqueada' : '⏳ Pendiente'}
+                  </span>
+                </div>
               </div>
 
               {/* Estado de conexión */}
@@ -727,6 +718,19 @@ const createSession = async () => {
               }`}>
                 {navigator.onLine ? '🟢 Conectado' : '🟡 Modo Offline'}
               </div>
+
+              {/* ✅ NUEVO: Diagnóstico rápido */}
+              <div className="text-xs text-center text-gray-500">
+                <details className="cursor-pointer">
+                  <summary className="hover:text-gray-700">🔍 Info de diagnóstico</summary>
+                  <div className="mt-2 text-left bg-gray-50 p-2 rounded">
+                    <p>Protocol: {window.location.protocol}</p>
+                    <p>Secure: {window.isSecureContext ? '✅' : '❌'}</p>
+                    <p>MediaDevices: {navigator.mediaDevices ? '✅' : '❌'}</p>
+                    <p>URL: {window.location.href}</p>
+                  </div>
+                </details>
+              </div>
             </div>
           </>
         )}
@@ -735,7 +739,7 @@ const createSession = async () => {
   );
 }
 
-// Funciones auxiliares (mantener igual)
+// Funciones auxiliares
 const generarReporte = (excelData, scannedCodes) => {
   const scannedArray = Array.from(scannedCodes);
   
@@ -784,7 +788,7 @@ const exportarACSV = (reporte) => {
     csvContent += `ESCANEADO,${item.Código || ''},${item.Producto || ''},${item.Cantidad || ''},${item.Guía || ''},${item.Cliente || ''}\n`;
   });
   
-  const blob = new Blob([csvContent], { type: 'text/csv' });
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
