@@ -1,0 +1,7 @@
+﻿tunnel: [PEGA_AQUI_EL_TUNNEL_ID]
+credentials-file: .cloudflared/[TUNNEL_ID].json
+
+ingress:
+  - hostname: scanpwa.tudominio.com
+    service: http://localhost:5173
+  - service: http_status:404
