@@ -1,0 +1,8 @@
+name = "scan-pwa-api"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[env.production]
+routes = [
+  { pattern = "scan-pwa-api.afdiazl.workers.dev", custom_domain = true }
+]
